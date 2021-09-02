@@ -1,0 +1,218 @@
+---
+title: "Regression Results"
+author: "Max O'Krepki"
+date: "2/10/2021"
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE}
+library(sf)
+library(plm)
+library(lmtest)
+library(tidyverse)
+library(knitr)
+library(tmap)
+library(stargazer)
+library(kableExtra)
+library(tmap)
+library(ggplot2)
+```
+
+
+
+```{r, eval = FALSE, echo = FALSE}
+df <- data.frame(x1 = 0, y1 = 0, x2 = 1, y2 = 1)
+
+ggplot() + geom_point() + xlim(0, 5) + ylim(0, 5) + geom_segment(aes(x = x1, y = y1,xend = x2,yend = y2), data = df) + geom_label(aes(2,2))
+```
+
+Example figure
+```{r}
+df <- data.frame(x1 = 0, y1 = 0, x2 = 1, y2 = 1)
+# View(df)
+ggplot(df) + geom_segment(aes(x1,y1,x2,y2), data = df) + xlim(0, 10) + ylim(0, 10)
+```
+
+
+Crime figures
+```{r}
+# load("crime.sf.v2")
+load("ba_bgs_lean_v2")
+# load("ba_bgs_long_v2")
+load("regression_models")
+load("crime_rate_table")
+load("housing_sf")
+load("crime_2017_maps")
+```
+
+Have to create these here otherwise the markdown won't know where to find them. 
+```{r, echo=FALSE}
+property <- c("VEHICLE THEFT", "LARCENY/THEFT", "BURGLARY", "VANDALISM", "STOLEN PROPERTY", "TRESPASS", "ARSON")
+violent  <- c("ASSAULT", "ROBBERY", "SEX OFFENSES, FORCIBLE")
+drug     <- "DRUG/NARCOTIC"
+nuisance <- c("SUSPICIOUS OCC", "DRUNKENNESS", "DISORDERLY CONDUCT", "LOITERING", "LIQUOR LAWS", "GAMBLING", "PROSTITUTION")
+
+```
+
+
+How to create this? I could do a couple of group_by operations, just send in a new filtered data frame to each. I almost want to do some sort of cbind, or even a series of left joins. I think I'm trying to prematurely optimize, just write out the long way to do it then see how I can condense, if possible. I tell you what, do the widening before kable. 
+```{r, cache=TRUE, eval=FALSE}
+class(crime.sf)
+
+# Creates crime counts for all categories
+crime_summary <- as.data.frame(crime.sf) %>% group_by(year) %>% summarize("crime_counts_total" = n())
+
+# Property
+crime_summary <- left_join(crime_summary, {as.data.frame(crime.sf) %>% filter(Category %in% property) %>% group_by(year) %>% summarize("crime_counts_property" = n())})
+
+# Violent
+crime_summary <- left_join(crime_summary, {as.data.frame(crime.sf) %>% filter(Category %in% violent) %>% group_by(year) %>% summarize("crime_counts_violent" = n())})
+
+# Nuisance
+crime_summary <- left_join(crime_summary, {as.data.frame(crime.sf) %>% filter(Category %in% nuisance) %>% group_by(year) %>% summarize("crime_counts_nuisance" = n())})
+
+
+# Calculates population by year
+pop_sum <- ba_bgs_long %>% group_by(year) %>% summarize("pop_total" = sum(population))
+
+
+# Generates the crime summary table. 
+crime_summary <- crime_summary %>% mutate("crime_rate_total" = crime_counts_total/(pop_sum$pop_total/100), "crime_rate_property" = crime_counts_property/(pop_sum$pop_total/100), "crime_rate_violent" = crime_counts_violent/(pop_sum$pop_total/100), "crime_rate_nuisance" = crime_counts_nuisance/(pop_sum$pop_total/100))
+
+crime_summary <- crime_summary[,c(1,6:9)]
+```
+
+# Table - crime rates per 100 residents per year. 
+```{r, cache=TRUE, eval=FALSE}
+# tk - just end up saving this data frame and load from memory, it'll be easier, honestly. 
+# crime_summary$year <- as.character(crime_summary$year)
+
+crime_rate_table <- t(crime_summary)
+colnames(crime_rate_table) <- crime_rate_table[1,]
+
+crime_rate_table <- crime_rate_table[-1,]
+rownames(crime_rate_table) <- c("Total Crimes", "Property", "Violent", "Nuisance")
+
+# crime_rate_table <- as.numeric(crime_rate_table)
+
+save(crime_rate_table, file = "crime_rate_table")
+```
+
+```{r, echo=FALSE}
+
+knitr::kable(crime_rate_table, digits = 1, booktabs = TRUE, caption = "San Francisco reported crime rates per 100 residents by year and type") %>% kable_styling(latex_options="scale_down") %>% add_footnote("Source: San Francisco Police Department via SF Open Data Portal", notation = "none")
+```
+
+
+# Figure 1
+Good preview of basemaps. 
+https://leaflet-extras.github.io/leaflet-providers/preview/
+leaflet::providers
+
+Problematic block group:
+1500000US060750176011
+
+
+Right now it's all crime. At some point I'll do just property and violent?
+```{r, cache=TRUE, echo=FALSE, eval=FALSE}
+ba_bgs_long$year <- as.numeric(ba_bgs_long$year)
+
+# Come up with crime rate for 2017. 
+crime_2017 <- left_join(filter(ba_bgs_long, year == 2017),{ filter(as.data.frame(crime.sf), year == 2017) %>% group_by(geoid_long) %>% summarize("crime_counts" = n()) })
+
+# 2017 Property
+crime_2017_property <- left_join(filter(ba_bgs_long, year == 2017),{ filter(as.data.frame(crime.sf), year == 2017 & Category %in% property) %>% group_by(geoid_long) %>% summarize("crime_counts" = n()) })
+
+# 2017 Violent
+crime_2017_violent <- left_join(filter(ba_bgs_long, year == 2017),{ filter(as.data.frame(crime.sf), year == 2017 & Category %in% violent) %>% group_by(geoid_long) %>% summarize("crime_counts" = n()) })
+
+# 2017 Nuisance
+crime_2017_nuisance <- left_join(filter(ba_bgs_long, year == 2017),{ filter(as.data.frame(crime.sf), year == 2017 & Category %in% nuisance) %>% group_by(geoid_long) %>% summarize("crime_counts" = n()) })
+
+# All
+crime_2017 <- crime_2017 %>% mutate("crime_rate" = crime_counts/(population/100))
+range(crime_2017$crime_rate)
+
+# Property
+crime_2017_property <- crime_2017_property %>% mutate("crime_rate" = crime_counts/(population/100))
+
+# Violent
+crime_2017_violent <- crime_2017_violent %>% mutate("crime_rate" = crime_counts/(population/100))
+
+# Nuisance
+crime_2017_nuisance <- crime_2017_nuisance %>% mutate("crime_rate" = crime_counts/(population/100))
+
+
+crime_2017_map          <- left_join(ba_bgs_lean, crime_2017)
+crime_2017_property_map <- left_join(ba_bgs_lean, crime_2017_property)
+crime_2017_violent_map  <- left_join(ba_bgs_lean, crime_2017_violent)
+crime_2017_nuisance_map <- left_join(ba_bgs_lean, crime_2017_nuisance)
+
+# save(crime_2017_map, crime_2017_property_map, crime_2017_violent_map, crime_2017_nuisance_map, file = "crime_2017_maps")
+```
+
+
+tmaptools::palette_explorer
+
+```{r, fig.cap="Total crimes per 100 residents, San Francisco, 2017."}
+tm_shape(crime_2017_map, bbox=tmaptools::bb(matrix(c(-122.52, 37.70692295634627, -122.34, 37.8151870985090),2,2))) + tm_polygons("crime_rate", title = "", breaks = c(0,2,5,10,20,40,100,3000)) + tm_layout(bg.color = "skyblue")
+```
+
+Property
+```{r, fig.cap="Property crimes per 100 residents, San Francisco, 2017."}
+tm_shape(crime_2017_property_map, bbox=tmaptools::bb(matrix(c(-122.52, 37.70692295634627, -122.34, 37.8151870985090),2,2))) + tm_polygons("crime_rate", title = "", breaks = c(0,2,5,10,20,40,100,3000)) + tm_layout(bg.color = "skyblue")
+```
+
+Violent
+```{r, fig.cap="Violent crimes per 100 residents, San Francisco, 2017."}
+tm_shape(crime_2017_violent_map, bbox=tmaptools::bb(matrix(c(-122.52, 37.70692295634627, -122.34, 37.8151870985090),2,2))) + tm_polygons("crime_rate", title = "", breaks = c(0,2,5,10,20,40,100,3000)) + tm_layout(bg.color = "skyblue")
+```
+
+Nuisance
+```{r, fig.cap="Nuisance crimes per 100 residents, San Francisco, 2017."}
+tm_shape(crime_2017_nuisance_map, bbox=tmaptools::bb(matrix(c(-122.52, 37.70692295634627, -122.34, 37.8151870985090),2,2))) + tm_polygons("crime_rate", title = "", breaks = c(0,2,5,10,20,40,100,3000)) + tm_layout(bg.color = "skyblue")
+```
+
+
+
+
+Bottom left
+37.70692295634627, -122.51057492517226
+
+Top right
+37.81518709850902, -122.36594404123402
+
+
+The housing sites are all the "b"'s in housing_cleaned_lean. It's just the block groups that get sorted after that point depending on proximity to other housing sites. 
+
+With the other stuff I'm saving, probably just easier in the end to save this as an R binary object to just load at the very end. The final draft will likely be made in a clean Rmarkdown with all of the figure and table data saved as R binary objects. Housing_cleaned_lean is just a df, I'll have to turn that into an sf then go from there. 
+```{r}
+analysis_sites <- housing_sf
+names(analysis_sites)[3] <- "Facility Category"
+```
+
+
+```{r, fig.cap="Distribution of LIHTC sites in San Francisco"}
+tm_shape(ba_bgs_lean, bbox=tmaptools::bb(matrix(c(-122.52, 37.70692295634627, -122.33, 37.8151870985090),2,2))) + tm_polygons(col = "MAP_COLORS", palette = "Pastel1", minimize = TRUE, alpha = 0.6) +
+  tm_shape(analysis_sites) + tm_symbols(col= "Facility Category", palette = c("forestgreen","cornflowerblue"), size = 0.3)
+```
+
+
+
+
+Just a simple markdown to communicate intermediate results. 
+# Regression table
+, type = "text"
+ "footnotesize", okay, looks like the small size is okay. 
+```{r results='asis'}
+stargazer(model_all,model_property, model_violent, model_nuisance , omit = "geoid_long", column.sep.width = "0.5pt", no.space = TRUE, font.size = "small", omit.stat = c("rsq", "n", "ser"), dep.var.labels.include = FALSE, dep.var.caption = "", column.labels = c("Total Crimes", "Property Crimes", "Violent Crimes", "Nuisance Crimes"), title = " Table tk. Regression coefficients of neighborhood crime impact variables, by crime type", header = FALSE)
+```
+

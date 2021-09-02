@@ -1,0 +1,474 @@
+---
+title: "Consolidated work"
+author: "Max O'Krepki"
+date: "2/1/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+# library(rgdal)
+library(dplyr)
+library(readr)
+library(leaflet)
+library(ggplot2)
+library("rnaturalearth")
+library("rnaturalearthdata")
+library(mapsapi)
+library(rgeos)
+library(geosphere)
+library(tidyr)
+library(sf)
+library(plm)
+library(lmtest)
+```
+
+# Loading the data
+```{r data loading}
+load("housing_cleaned_lean_v2")
+load("ba_bgs_long_v2")
+load("crime.sf.v2")
+load("ba_bgs_lean_v2")
+```
+
+Not my preference to do it this way but it looks like some of the blocks that are entirely water are still showing up and I'm not really finding them until here. I think it makes the most sense to just drop the rows here. 
+```{r ad hoc problematic block group drop}
+problem_block_groups <- c("1500000US060750179021")
+ba_bgs_lean <- ba_bgs_lean %>% filter(! geoid_long %in% problem_block_groups)
+```
+
+
+# Flex variables. 
+
+For my reference, this is the original count using the values from the paper. 
+I'll play with the distance threshold but I'm pretty sure I'll definitely change the study period. 
+A tibble: 2 x 2
+  letter     n
+* <chr>  <int>
+1 a        119
+2 b          6
+
+Updated numbers from new data. 
+# A tibble: 2 x 2
+  letter     n
+* <chr>  <int>
+1 a        144
+2 b         18
+
+
+```{r flex variables}
+housing_cleaned_lean$letter <- "z"
+
+# Flex variables - change these to change the categorizations. 
+# Distance threshold. 
+# Original is 1,000' ~= 305 meters. How close another housing project has to be to trigger an a. Larger means farther apart. That is, the nearest housing project has to be farther apart to be included. I'll do 150 meters; it's just under 500 feet. 
+dist_threshold <- 150
+
+# The first and last years of the study period. Original study period was from 2008 - 2011. 2nd version was 2007 to 2014. I wanted three years data but I'm thinking two years before and after might be fine. 
+sp_begin <- 2006
+sp_end   <- 2015
+
+# Housing buffer variable. NOTE: units in feet. This will dictate how many block groups get included. If I were to publish, I'd use rings instead. 
+buffer_radius <- 2000
+# Number by which the population is divided for purposes of crime rate calculations. 
+crime_divide <- 100
+
+# Just use 15 000 feet = 4572 meters for now. Let me drop this down to 1,600 meters (~1 miles) and see what it looks like. The original threshold seems quite big for SF. 
+lag_threshold <- 1600
+```
+
+# Categorizing housing types.
+## This part is to identify the housing project types based on the following criteria. 
+
+Helper function to quickly label the projects outside of the study period. 
+```{r letter helper fx}
+letter_fixer <- function(year) {
+  
+  if (year < sp_begin | year > sp_end) {
+    return("a")
+  } else {
+    return("z")
+  }
+}
+```
+
+Running the helper function. 
+```{r running the initial letter assignment}
+housing_cleaned_lean$letter <- unlist(lapply(housing_cleaned_lean$afford_begins, letter_fixer))
+```
+
+```{r assing letters to housing}
+end_count <- nrow(housing_cleaned_lean)
+# test using i = 98
+
+# This is for resetting the test
+# i <- 98
+# housing_cleaned_lean$letter[i] <- "z"
+# boom, it looks like according to the test, it's spot on. 
+
+for (i in 1:end_count) {
+  print(i)
+  # if statement only entered if it's a z. Otherwise it moves on. 
+  if (housing_cleaned_lean$letter[i] %in% c("z")) {
+  
+      # current housing project letter z.
+      all_dists_temp <- rep(0, end_count)
+      current_z_loc <- c(housing_cleaned_lean$fixed_long[i], housing_cleaned_lean$fixed_lat[i])
+    
+    # Calculates all distances between current_z and others. Includes self distance of zero. 
+    for (j in 1:end_count) {
+    
+      all_dists_temp[j] <- distm(current_z_loc, c(housing_cleaned_lean$fixed_long[j], housing_cleaned_lean$fixed_lat[j]))
+      
+    }
+      
+     # order returns the indexes of values in ascending order, because it includes distance to self, I have to grab the second min.
+    nearest_dist <- sort(all_dists_temp)[2]
+     
+    nearest_year <- housing_cleaned_lean$afford_begins[order(all_dists_temp)[2]]
+    # print(nearest_dist)
+    # print(order(all_dists_temp)[2])
+    # print(nearest_year)
+    
+    # This is where I'll do the comparison of them all. 
+    if (nearest_dist > dist_threshold) {
+      housing_cleaned_lean$letter[i] <- "b"
+      # print("b")
+      # print(nearest_dist)
+      # print(nearest_year)
+    } else {
+      # makes the df that will hold the distances and years. 
+      temp_df <- data.frame("year" = housing_cleaned_lean$afford_begins, "dist" = all_dists_temp)
+      
+      current_z_year <- temp_df$year[i]
+      
+      # Filtering to only the ones within the threshold, has to be done because all within threshold need to be compared.  
+      temp_df <- temp_df %>% filter(dist < dist_threshold)
+      unique_years <- unique(temp_df$year)
+      
+      # first test to see if it's within a project built before or after study period. it's an "a"
+      
+      if (min(unique_years) < sp_begin | max(unique_years) > sp_end) {
+          housing_cleaned_lean$letter[i] <- "a"
+          print("a")
+        } else if (current_z_year == min(unique_years)) {
+          # Checking for ties or if it's the oldest. 
+          housing_cleaned_lean$letter[i] <- "b"
+          # print("b")
+          # print(nearest_dist)
+          # print(nearest_year)
+          # print(current_z_year)
+        } else if (current_z_year > min(unique_years)) {
+          # This checks if it's not the oldest, if it's newer, this check passes and it's an "a". 
+          housing_cleaned_lean$letter[i] <- "a"
+          # print("a")
+        }
+    }
+  }
+  # print("a")
+}
+
+```
+
+```{r summary of housing by letters}
+count(housing_cleaned_lean, letter)
+```
+
+This chunk is to help map out the housing projects by type. 
+```{r map helper chunk}
+source("map_helper.R")
+LIHTC_map
+```
+
+
+# Categorizing area types. 
+## Joining the housing letters to the block groups to determine area types. 
+
+Long = X, Lat = Y. 
+Making an sf object out of the housing data. 
+```{r making sf from housing data}
+housing_sf <- st_as_sf(housing_cleaned_lean, coords = c("fixed_long", "fixed_lat"), crs = st_crs(ba_bgs_lean))
+original_crs <- st_crs(housing_sf)
+```
+
+According to this website, https://epsg.io/?q=san+francisco, it's in feet. As per plots below, it looks good. 
+```{r creating and joining the housing buffers}
+# The housing object in feet. Tk - maybe extra, but ask me how much I care?
+housing_sf_feet <- st_transform(housing_sf ,7132)
+
+# Creating the housing buffers. 
+housing_buffers <- st_buffer(housing_sf_feet, dist = buffer_radius)
+
+# Transforming the housing_sf back to the original WGS. 
+housing_buffers <- st_transform(housing_buffers, original_crs)
+
+# Joining the buffers to the block groups sf object. 
+bgs_buffers_joined <- st_join(ba_bgs_lean, housing_buffers[c("afford_begins", "letter")])
+```
+
+For loop that labels each block group. 
+```{r block group types}
+ba_bgs_lean$type          <- -99
+ba_bgs_lean$afford_begins <- NA
+
+for (i in 1:nrow(ba_bgs_lean)) {
+  
+  temp_df <- bgs_buffers_joined %>% filter(geoid_long == ba_bgs_lean$geoid_long[i])
+  
+  # first test to see if the letter is na, if it is, then it's a type 3 (means not within housing project). 
+    if(is.na(temp_df$letter)) {
+      ba_bgs_lean$type[i] <- 3
+    } else if ("a" %in% temp_df$letter) {
+      ba_bgs_lean$type[i] <- 1
+    } else {
+      ba_bgs_lean$type[i]          <- 2
+      ba_bgs_lean$afford_begins[i] <- temp_df$afford_begins[1]
+    }
+ 
+  }
+```
+
+If I get 11 here, the work is the same. Boom. It works. 
+```{r block group type summaries}
+nrow(filter(ba_bgs_lean, type == 2))
+plot(ba_bgs_lean["type"])
+```
+
+# Crime Rates.
+## This section will be for calculating the crime rates for each area for each year.  
+It starts off with the population data set in long format with the crime data set in wide format. 
+
+This first chunk makes a long data set that gives number of crimes per year per data set. Filtering by crime type would have to take place before this. 
+
+```{r creating the crime categories}
+# unique(crime.sf$Category)
+property <- c("VEHICLE THEFT", "LARCENY/THEFT", "BURGLARY", "VANDALISM", "STOLEN PROPERTY", "TRESPASS", "ARSON")
+violent  <- c("ASSAULT", "ROBBERY", "SEX OFFENSES, FORCIBLE")
+drug     <- "DRUG/NARCOTIC"
+nuisance <- c("SUSPICIOUS OCC", "DRUNKENNESS", "DISORDERLY CONDUCT", "LOITERING", "LIQUOR LAWS", "GAMBLING", "PROSTITUTION")
+
+```
+
+
+```{r filtering by crime type}
+# All
+# crime.sf.subset <- crime.sf
+
+# Property
+# crime.sf.subset <- crime.sf %>% filter(Category %in% property)
+# # Violent
+# crime.sf.subset <- crime.sf %>% filter(Category %in% violent)
+# # Drug
+# crime.sf.subset <- crime.sf %>% filter(Category %in% drug)
+# # Nuisance
+# crime.sf.subset <- crime.sf %>% filter(Category %in% nuisance)
+```
+
+
+```{r crimes per year per area df}
+crime.bg.year <- as.data.frame(crime.sf.subset[,c(7,9)]) %>% group_by(geoid_long, year) %>% summarise(yearly_crimes = n())
+```
+
+This chunk fixes the crime rate year, don't know how it happened but I'll just keep it. 
+It then joins the tables, calculates yearly crime rates then saves on the columns needed. 
+
+```{r computing crime rates}
+# Dividing the ba_bgs_long population to get a rate per a number specified above. 
+ba_bgs_long$population <- ba_bgs_long$population/crime_divide
+
+
+crime.bg.year$year <- as.character(crime.bg.year$year)
+crime.rates <- ba_bgs_long %>% left_join(crime.bg.year)
+crime.rates$crime_rates <- crime.rates$yearly_crimes/crime.rates$population
+crime.rates <- crime.rates[,c(1,2,5)]
+```
+
+# Space Lag
+## This section is where the spatial lag variable will be created. 
+
+Need crime rates attached to geometry to find the centroid for each. If I filtered down to only the areas in the final data set, it would be faster. Maybe implement later. I'm hesitant to change things up too much. 
+```{r crime and geometry df}
+crime_rates_geometry <- left_join(ba_bgs_lean[,1:2], pivot_wider(crime.rates, names_from = "year", values_from = "crime_rates"))
+crime_rates_geometry <- st_centroid(crime_rates_geometry)
+```
+
+Spatial lag variable is created here. 
+```{r computing spatial lag}
+end_count <- nrow(crime_rates_geometry)
+space_lag <- data.frame(geoid_long = crime_rates_geometry$geoid_long, matrix(0, ncol = 14, nrow = end_count))
+names(space_lag)[2:15] <- names(crime_rates_geometry)[2:15]
+
+for (i in 1:end_count) {
+  print(i)
+  # Current area 
+  current_sl_area_loc <- unlist(crime_rates_geometry$geometry[i])
+  crime_rates_geometry$all_dists <- 0
+  
+  for (j in 1:end_count) {
+    crime_rates_geometry$all_dists[j] <- distm(current_sl_area_loc, unlist(crime_rates_geometry$geometry[j]))
+  }
+  
+  temp_df <- filter(crime_rates_geometry, all_dists <= lag_threshold)
+  
+  # Creating the spatial lag for each year. 
+  
+  # 2017
+  space_lag$`2017`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2017`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2016
+  space_lag$`2016`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2016`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2015
+  space_lag$`2015`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2015`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2014
+  space_lag$`2014`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2014`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2013
+  space_lag$`2013`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2013`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2012
+  space_lag$`2012`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2012`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2011
+  space_lag$`2011`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2011`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2010
+    space_lag$`2010`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2010`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+    
+  # 2009
+  space_lag$`2009`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2009`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2008
+  space_lag$`2008`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2008`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2007
+  space_lag$`2007`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2007`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2006
+  space_lag$`2006`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2006`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2005
+  space_lag$`2005`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2005`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+  # 2004
+  space_lag$`2004`[i] <- sum((1/temp_df$all_dists[temp_df$all_dists > 0])*temp_df$`2004`[temp_df$all_dists > 0])/sum((1/temp_df$all_dists[temp_df$all_dists > 0]))
+  
+}
+
+```
+
+Pivoting the data to wide format. This will be joined to the final data set. Don't join here, join later. 
+```{r making space lag df long}
+space_lag <- pivot_longer(space_lag, !geoid_long, names_to = "year", values_to = "space_lag")
+space_lag$year <- as.numeric(space_lag$year)
+```
+
+
+# Conjuction of the spheres
+## This section will pull everything together into a single data set that the regression will be run on. 
+
+### CRAll 
+Dummy indicating area 2. 
+
+Tk - 11 is a test, it's the number of category 2 areas. Would be good to work in some sort of test at the top that checks for continuity throughout. 
+```{r generating CRAll}
+ba_bgs_lean$CRAll <- ba_bgs_lean$type == 2
+ba_bgs_lean$CRAll <- as.numeric(ba_bgs_lean$CRAll)
+print(paste("The number of type 2 areas:",sum(ba_bgs_lean$CRAll))) # = 11 so we're all good. 
+```
+
+### CPost  
+Dummy for category 2 that activates after opening. 
+```{r generating CPost}
+ba_bgs_lean <- as.data.frame(ba_bgs_lean)
+ba_bgs_lean <- ba_bgs_lean[,-2]
+
+# Actual conjunction of data spheres really starts here. 
+final_dataset <- left_join(crime.rates, ba_bgs_lean)
+
+# Not sure where year is changing but it is, I just won't worry about it. 
+final_dataset$year <- as.numeric(final_dataset$year)
+
+# Part of the built in test. 
+sum(final_dataset$CRAll)/14 # = 11, we're all good. 
+
+# Filter out area 1's. Don't need them anymore. 
+final_dataset <- final_dataset %>% filter(type != 1)
+
+# Drop the type column, don't need anymore. 
+final_dataset <- final_dataset[,-4]
+
+# This test rings true if the year is after the year afford begins (opening) and false or NA otherwise. 
+final_dataset$CPost <- final_dataset$year > final_dataset$afford_begins # Looks like did it. 
+# View(filter(final_dataset, CRAll == 1))
+
+# Replacing NA's with zeros. 
+final_dataset$CPost[is.na(final_dataset$CPost)] <- 0
+```
+
+### Time  
+Time trend for category 2 areas.
+```{r generating Time}
+final_dataset$Time <- (final_dataset$year - 2003)*final_dataset$CRAll
+
+# sum(filter(final_dataset, CRAll == 1)$Time)/sum(1:14) # = 11, just another check to make sure things are correct. Doesn't really work anymore. 
+```
+
+### TrPost 
+Post-opening trend variables for category 2 areas. 
+```{r generating TrPost}
+final_dataset$TrPost <- (final_dataset$year - final_dataset$afford_begins)*final_dataset$CPost
+# Remove NAs for TrPost
+final_dataset$TrPost[is.na(final_dataset$TrPost)] <- 0
+# Not really a quick cheater check for this one but it looks like it worked. 
+colSums(filter(final_dataset, CRAll == 0)[,5:8]) # ALl zeros, looks like it worked. 
+
+# Quick inspection of this should indicate whether things went smoothly or not. 
+# View(filter(final_dataset, CRAll == 1))
+```
+
+### Adding spatial lag
+This chunk does a left join to add the spatial lag variables to the final data set. 
+```{r adding the spatial lag}
+final_dataset <- final_dataset %>% left_join(space_lag)
+# Dropping afford begins
+final_dataset <- final_dataset[,-4]
+```
+
+
+Quickly save the final_dataset
+```{r saving the final dataset}
+final_dataset$year <- as.factor(final_dataset$year)
+final_dataset <- final_dataset %>% left_join(ba_bgs_long)
+save(final_dataset, file = "final_dataset")
+# load("final_dataset")
+```
+
+### Final Regression
+lm(formula = crime_rates ~ CRAll + CPost + Time + TrPost, data = final_dataset)
+
+Just run the regression with the data as is and replicate what they did in the paper. 
+```{r running the regression}
+sum(is.na(final_dataset))
+crime_tefe_lm_mod <- lm(formula = crime_rates ~ CRAll + CPost + Time + TrPost + space_lag + year + geoid_long, data = final_dataset, weights = population)
+
+# model_no_weights <- summary(crime_tefe_lm_mod)
+# summary(crime_tefe_lm_mod)
+# model_all      <- crime_tefe_lm_mod
+# model_property <- crime_tefe_lm_mod
+# model_violent  <- crime_tefe_lm_mod
+# model_drug     <- crime_tefe_lm_mod
+# model_nuisance <- crime_tefe_lm_mod
+save(model_all, model_property, model_violent, model_nuisance, file = "regression_models")
+<!-- ``` -->
+
+crime_tefe_lm_mod$coefficients[1:19]
+summary(crime_tefe_lm_mod)
+coeftest(crime_tefe_lm_mod, vcov = vcovHC, type = "HC1")
+
